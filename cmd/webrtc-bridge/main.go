@@ -26,7 +26,7 @@ const (
 	defaultMediaAPIBaseURL = "http://127.0.0.1:9997"
 	defaultKodiAPIEndpoint = "http://127.0.0.1:8080/jsonrpc"
 	defaultStreamHost      = "127.0.0.1"
-	hlsStreamPort          = "8888"
+	rtspStreamPort         = "8554"
 	pathName               = "screenshare"
 )
 
@@ -43,7 +43,7 @@ func main() {
 	flag.StringVar(&kodiEndpoint, "kodi-endpoint", defaultKodiAPIEndpoint, "Kodi JSON-RPC endpoint")
 	flag.StringVar(&kodiUsername, "kodi-username", "", "Kodi web server username for HTTP basic auth")
 	flag.StringVar(&kodiPassword, "kodi-password", "", "Kodi web server password for HTTP basic auth")
-	flag.StringVar(&streamHost, "stream-host", defaultStreamHost, "Host or IP address Kodi should use for the HLS stream")
+	flag.StringVar(&streamHost, "stream-host", defaultStreamHost, "Host or IP address Kodi should use for the RTSP stream")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "webrtc-bridge: ", log.LstdFlags|log.Lmsgprefix)
@@ -60,9 +60,8 @@ func main() {
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	state := session.NewState()
-	streamURL := buildHLSStreamURL(streamHost)
-	readinessURL := buildHLSStreamURL(defaultStreamHost)
-	kodiClient := kodi.NewClient(kodiEndpoint, streamURL, readinessURL, kodiUsername, kodiPassword, httpClient)
+	streamURL := buildRTSPStreamURL(streamHost)
+	kodiClient := kodi.NewClient(kodiEndpoint, streamURL, kodiUsername, kodiPassword, httpClient)
 	mediaClient := mediamtx.NewAPIClient(defaultMediaAPIBaseURL, pathName, httpClient)
 	app := server.New(state, kodiClient, mediaClient)
 	manager := mediamtx.NewManager(filepath.Join(".", "third_party", "mediamtx", "mediamtx"), hookBaseURL, logger)
@@ -87,8 +86,7 @@ func main() {
 	}()
 
 	logger.Printf("serving web UI and API on %s", listenAddr)
-	logger.Printf("Kodi will open HLS stream at %s", streamURL)
-	logger.Printf("bridge will wait for local HLS readiness at %s", readinessURL)
+	logger.Printf("Kodi will open RTSP stream at %s", streamURL)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatalf("HTTP server stopped: %v", err)
 	}
@@ -108,10 +106,10 @@ func deriveHookBaseURL(listenAddr string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port), nil
 }
 
-func buildHLSStreamURL(host string) string {
+func buildRTSPStreamURL(host string) string {
 	return (&url.URL{
-		Scheme: "http",
-		Host:   net.JoinHostPort(host, hlsStreamPort),
-		Path:   "/" + pathName + "/index.m3u8",
+		Scheme: "rtsp",
+		Host:   net.JoinHostPort(host, rtspStreamPort),
+		Path:   "/" + pathName,
 	}).String()
 }

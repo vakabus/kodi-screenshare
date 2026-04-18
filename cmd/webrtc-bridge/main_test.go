@@ -40,7 +40,7 @@ func TestDeriveHookBaseURL(t *testing.T) {
 	}
 }
 
-func TestBuildHLSStreamURL(t *testing.T) {
+func TestBuildRTSPStreamURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -48,17 +48,17 @@ func TestBuildHLSStreamURL(t *testing.T) {
 		host string
 		want string
 	}{
-		{name: "ipv4", host: "192.168.1.50", want: "http://192.168.1.50:8888/screenshare/index.m3u8"},
-		{name: "hostname", host: "bridge.local", want: "http://bridge.local:8888/screenshare/index.m3u8"},
-		{name: "ipv6", host: "2001:db8::10", want: "http://[2001:db8::10]:8888/screenshare/index.m3u8"},
+		{name: "ipv4", host: "192.168.1.50", want: "rtsp://192.168.1.50:8554/screenshare"},
+		{name: "hostname", host: "bridge.local", want: "rtsp://bridge.local:8554/screenshare"},
+		{name: "ipv6", host: "2001:db8::10", want: "rtsp://[2001:db8::10]:8554/screenshare"},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := buildHLSStreamURL(tt.host); got != tt.want {
-				t.Fatalf("buildHLSStreamURL(%q) = %q, want %q", tt.host, got, tt.want)
+			if got := buildRTSPStreamURL(tt.host); got != tt.want {
+				t.Fatalf("buildRTSPStreamURL(%q) = %q, want %q", tt.host, got, tt.want)
 			}
 		})
 	}

@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestOpen(t *testing.T) {
@@ -15,27 +14,20 @@ func TestOpen(t *testing.T) {
 
 	var got rpcRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/index.m3u8":
-			if r.Method != http.MethodGet {
-				t.Fatalf("unexpected stream method: %s", r.Method)
-			}
-			_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n"))
-		case "/jsonrpc":
-			if r.Method != http.MethodPost {
-				t.Fatalf("unexpected method: %s", r.Method)
-			}
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-				t.Fatalf("decode request: %v", err)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		default:
+		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL+"/jsonrpc", server.URL+"/index.m3u8", server.URL+"/index.m3u8", "", "", server.Client())
+	client := NewClient(server.URL+"/jsonrpc", "rtsp://stream.example:8554/screenshare", "", "", server.Client())
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -51,71 +43,55 @@ func TestOpen(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected item type: %T", params["item"])
 	}
-	if item["file"] != server.URL+"/index.m3u8" {
+	if item["file"] != "rtsp://stream.example:8554/screenshare" {
 		t.Fatalf("unexpected file payload: %#v", item)
 	}
 }
 
-func TestOpenWaitsForPlaylistReadiness(t *testing.T) {
+func TestOpenRetriesTransientRPCFailure(t *testing.T) {
 	t.Parallel()
 
-	var getCount int
 	var postCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/index.m3u8":
-			getCount++
-			if getCount < 2 {
-				http.NotFound(w, r)
-				return
-			}
-			_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n"))
-		case "/jsonrpc":
-			postCount++
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		default:
+		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		postCount++
+		if postCount == 1 {
+			http.Error(w, "temporary failure", http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL+"/jsonrpc", server.URL+"/index.m3u8", server.URL+"/index.m3u8", "", "", server.Client())
+	client := NewClient(server.URL+"/jsonrpc", "rtsp://stream.example:8554/screenshare", "", "", server.Client())
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if getCount < 2 {
-		t.Fatalf("expected readiness polling before opening, got %d GETs", getCount)
-	}
-	if postCount != 1 {
-		t.Fatalf("expected exactly one Player.Open RPC, got %d", postCount)
+	if postCount != 2 {
+		t.Fatalf("expected retry after transient RPC failure, got %d attempts", postCount)
 	}
 }
 
-func TestOpenFailsWhenPlaylistNeverBecomesReady(t *testing.T) {
+func TestOpenFailsWhenRPCNeverSucceeds(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/index.m3u8":
-			http.NotFound(w, r)
-		case "/jsonrpc":
-			t.Fatal("did not expect Player.Open RPC when stream is not ready")
-		default:
+		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		http.Error(w, "still failing", http.StatusBadGateway)
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL+"/jsonrpc", server.URL+"/index.m3u8", server.URL+"/index.m3u8", "", "", server.Client())
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-
-	err := client.Open(ctx)
+	client := NewClient(server.URL+"/jsonrpc", "rtsp://stream.example:8554/screenshare", "", "", server.Client())
+	err := client.Open(context.Background())
 	if err == nil {
-		t.Fatal("expected Open() to fail when playlist never becomes ready")
+		t.Fatal("expected Open() to fail when RPC never succeeds")
 	}
-	if !strings.Contains(err.Error(), "wait for HLS stream readiness") {
-		t.Fatalf("expected readiness error, got %v", err)
+	if !strings.Contains(err.Error(), "open Kodi stream at rtsp://stream.example:8554/screenshare") {
+		t.Fatalf("expected RTSP open error, got %v", err)
 	}
 }
 
@@ -143,7 +119,7 @@ func TestStop(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "ignored", "", "", "", server.Client())
+	client := NewClient(server.URL, "ignored", "", "", server.Client())
 	if err := client.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
@@ -160,68 +136,23 @@ func TestOpenWithBasicAuth(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/index.m3u8":
-			_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n"))
-		case "/jsonrpc":
-			username, password, ok := r.BasicAuth()
-			if !ok {
-				t.Fatal("expected basic auth header")
-			}
-			if username != "kodi" || password != "secret" {
-				t.Fatalf("unexpected basic auth credentials: %q / %q", username, password)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		default:
+		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			t.Fatal("expected basic auth header")
+		}
+		if username != "kodi" || password != "secret" {
+			t.Fatalf("unexpected basic auth credentials: %q / %q", username, password)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL+"/jsonrpc", server.URL+"/index.m3u8", server.URL+"/index.m3u8", "kodi", "secret", server.Client())
+	client := NewClient(server.URL+"/jsonrpc", "rtsp://stream.example:8554/screenshare", "kodi", "secret", server.Client())
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
-	}
-}
-
-func TestOpenUsesSeparateReadinessURL(t *testing.T) {
-	t.Parallel()
-
-	var readyChecks int
-	var got rpcRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/ready/index.m3u8":
-			readyChecks++
-			_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:1,\nsegment.ts\n"))
-		case "/jsonrpc":
-			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-				t.Fatalf("decode request: %v", err)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		default:
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-	}))
-	defer server.Close()
-
-	client := NewClient(server.URL+"/jsonrpc", "http://stream.example/screenshare/index.m3u8", server.URL+"/ready/index.m3u8", "", "", server.Client())
-	if err := client.Open(context.Background()); err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	if readyChecks == 0 {
-		t.Fatal("expected readiness URL to be polled")
-	}
-	params, ok := got.Params.(map[string]any)
-	if !ok {
-		t.Fatalf("unexpected params type: %T", got.Params)
-	}
-	item, ok := params["item"].(map[string]any)
-	if !ok {
-		t.Fatalf("unexpected item type: %T", params["item"])
-	}
-	if item["file"] != "http://stream.example/screenshare/index.m3u8" {
-		t.Fatalf("unexpected file payload: %#v", item)
 	}
 }
 
