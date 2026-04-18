@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kodi Screen Share</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 42rem; }
+    button { padding: 0.75rem 1rem; margin-right: 0.75rem; }
+    .status { margin: 1rem 0; font-weight: 600; }
+    .hint { color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Kodi Screen Share</h1>
+  <p>Share your screen to the meeting room TV.</p>
+  <div class="status" id="status">Idle</div>
+  <p class="hint">Use a modern browser. Audio is intentionally disabled in v1.</p>
+  <button id="share">Share Screen</button>
+  <button id="stop" disabled>Stop Sharing</button>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const shareButton = document.getElementById('share');
+    const stopButton = document.getElementById('stop');
+
+    let stream;
+    let peerConnection;
+    let whipResourceUrl;
+    let offerData;
+    let queuedCandidates = [];
+
+    function log(...args) {
+      console.log('[kodi-screenshare]', ...args);
+    }
+
+    function logError(...args) {
+      console.error('[kodi-screenshare]', ...args);
+    }
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    function setSharingUI(isSharing) {
+      shareButton.disabled = isSharing;
+      stopButton.disabled = !isSharing;
+    }
+
+    function parseIceServers(linkHeader) {
+      if (!linkHeader) return [];
+      return linkHeader.split(', ').map((link) => {
+        const match = link.match(/^<(.+?)>; rel="ice-server"(?:; username="(.*?)"; credential="(.*?)"; credential-type="password")?/i);
+        if (!match) return null;
+
+        const server = { urls: [match[1]] };
+        if (match[2] !== undefined) {
+          server.username = JSON.parse(`"${match[2]}"`);
+          server.credential = JSON.parse(`"${match[3]}"`);
+          server.credentialType = 'password';
+        }
+        return server;
+      }).filter(Boolean);
+    }
+
+    function parseOfferData(sdp) {
+      const data = { iceUfrag: '', icePwd: '', medias: [] };
+      for (const line of sdp.split('\r\n')) {
+        if (line.startsWith('m=')) {
+          data.medias.push(line.slice(2));
+        } else if (!data.iceUfrag && line.startsWith('a=ice-ufrag:')) {
+          data.iceUfrag = line.slice('a=ice-ufrag:'.length);
+        } else if (!data.icePwd && line.startsWith('a=ice-pwd:')) {
+          data.icePwd = line.slice('a=ice-pwd:'.length);
+        }
+      }
+      return data;
+    }
+
+    function generateSdpFragment(candidates) {
+      const candidatesByMedia = new Map();
+      for (const candidate of candidates) {
+        const mid = candidate.sdpMLineIndex;
+        if (!candidatesByMedia.has(mid)) candidatesByMedia.set(mid, []);
+        candidatesByMedia.get(mid).push(candidate);
+      }
+
+      let fragment = `a=ice-ufrag:${offerData.iceUfrag}\r\na=ice-pwd:${offerData.icePwd}\r\n`;
+      offerData.medias.forEach((media, mid) => {
+        const mediaCandidates = candidatesByMedia.get(mid);
+        if (!mediaCandidates) return;
+
+        fragment += `m=${media}\r\na=mid:${mid}\r\n`;
+        mediaCandidates.forEach((candidate) => {
+          fragment += `a=${candidate.candidate}\r\n`;
+        });
+      });
+
+      return fragment;
+    }
+
+    async function requestIceServers(whipUrl) {
+      log('requesting ICE servers', whipUrl);
+      const response = await fetch(whipUrl, { method: 'OPTIONS' });
+      if (!response.ok) {
+        log('ICE server request returned non-OK status', response.status);
+        return [];
+      }
+
+      const iceServers = parseIceServers(response.headers.get('Link'));
+      log('received ICE server config', { count: iceServers.length });
+      return iceServers;
+    }
+
+    async function sendLocalCandidates(candidates) {
+      if (!whipResourceUrl || candidates.length === 0) return;
+
+      log('sending ICE candidates', { count: candidates.length, url: whipResourceUrl });
+
+      const response = await fetch(whipResourceUrl, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/trickle-ice-sdpfrag',
+          'If-Match': '*',
+        },
+        body: generateSdpFragment(candidates),
+      });
+
+      if (!response.ok && response.status !== 204) {
+        throw new Error(`Could not send ICE candidates: ${response.status}`);
+      }
+
+      log('ICE candidates accepted', { status: response.status });
+    }
+
+    function handleLocalCandidate(event) {
+      if (!event.candidate) {
+        log('local ICE gathering completed');
+        return;
+      }
+
+      log('local ICE candidate', {
+        protocol: event.candidate.protocol,
+        type: event.candidate.type,
+        mid: event.candidate.sdpMid,
+      });
+
+      if (!whipResourceUrl) {
+        queuedCandidates.push(event.candidate);
+        log('queued ICE candidate until WHIP session URL is available', { queued: queuedCandidates.length });
+        return;
+      }
+
+      sendLocalCandidates([event.candidate]).catch((error) => {
+        logError('failed to send local ICE candidate', error);
+        setStatus(error.message || 'Could not send ICE candidates.');
+      });
+    }
+
+    function handleConnectionStateChange() {
+      if (!peerConnection) return;
+
+      log('peer connection state changed', peerConnection.connectionState);
+
+      if (peerConnection.connectionState === 'connected') {
+        setSharingUI(true);
+        setStatus('Sharing');
+      } else if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'closed') {
+        stopSharing().catch((error) => {
+          logError('failed to stop after connection loss', error);
+          setStatus('Connection lost.');
+        });
+      }
+    }
+
+    async function ensureAvailability() {
+      log('checking current session availability');
+      const response = await fetch('/api/status');
+      const status = await response.json();
+      log('status response', status);
+      if (!status.active) return;
+
+      const confirmed = window.confirm('Someone is currently sharing. Take over?');
+      if (!confirmed) throw new Error('Takeover cancelled.');
+
+      log('taking over active session');
+      const takeover = await fetch('/api/takeover', { method: 'POST' });
+      if (!takeover.ok) throw new Error('Could not take over the current session.');
+      log('takeover request completed');
+    }
+
+    function preferH264(transceiver) {
+      const capabilities = RTCRtpSender.getCapabilities('video');
+      if (!capabilities || !Array.isArray(capabilities.codecs)) return;
+
+      const h264 = capabilities.codecs.filter(codec => codec.mimeType === 'video/H264');
+      const rest = capabilities.codecs.filter(codec => codec.mimeType !== 'video/H264');
+      if (h264.length > 0) transceiver.setCodecPreferences([...h264, ...rest]);
+    }
+
+    async function startSharing() {
+      log('starting screen share flow');
+      setStatus('Requesting permission...');
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      log('screen capture granted', { videoTracks: stream.getVideoTracks().length, audioTracks: stream.getAudioTracks().length });
+
+      setStatus('Checking availability...');
+      await ensureAvailability();
+
+      setStatus('Connecting...');
+      const whipUrl = `http://${location.hostname}:8889/screenshare/whip`;
+      const iceServers = await requestIceServers(whipUrl);
+      peerConnection = new RTCPeerConnection({ iceServers, sdpSemantics: 'unified-plan' });
+      log('created RTCPeerConnection', { iceServers: iceServers.length });
+      peerConnection.onicecandidate = handleLocalCandidate;
+      peerConnection.onconnectionstatechange = handleConnectionStateChange;
+
+      const [videoTrack] = stream.getVideoTracks();
+      const transceiver = peerConnection.addTransceiver(videoTrack, { direction: 'sendonly', streams: [stream] });
+      preferH264(transceiver);
+      log('added video track to peer connection', { label: videoTrack?.label || 'unknown' });
+
+      videoTrack.onended = () => {
+        log('screen capture ended by browser/user');
+        stopSharing();
+      };
+
+      const offer = await peerConnection.createOffer();
+      offerData = parseOfferData(offer.sdp);
+      await peerConnection.setLocalDescription(offer);
+      log('created local SDP offer', { mediaSections: offerData.medias.length });
+
+      log('posting WHIP offer', whipUrl);
+      const whipResponse = await fetch(whipUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: offer.sdp,
+      });
+      if (whipResponse.status !== 201) throw new Error(`WHIP publish failed: ${whipResponse.status}`);
+      log('WHIP offer accepted', { status: whipResponse.status });
+
+      const answer = await whipResponse.text();
+      await peerConnection.setRemoteDescription({ type: 'answer', sdp: answer });
+      log('remote SDP answer applied');
+
+      const locationHeader = whipResponse.headers.get('Location');
+      whipResourceUrl = locationHeader ? new URL(locationHeader, whipResponse.url).toString() : null;
+      log('WHIP session URL established', whipResourceUrl);
+
+      if (queuedCandidates.length > 0) {
+        log('flushing queued ICE candidates', { count: queuedCandidates.length });
+        await sendLocalCandidates(queuedCandidates);
+        queuedCandidates = [];
+      }
+
+      setStatus('Waiting for media connection...');
+      log('waiting for peer connection to reach connected state');
+    }
+
+    async function stopSharing() {
+      log('stopping screen share flow');
+      if (whipResourceUrl) {
+        log('sending WHIP DELETE', whipResourceUrl);
+        await fetch(whipResourceUrl, { method: 'DELETE' }).catch(() => {});
+      }
+      if (peerConnection) peerConnection.close();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+
+      stream = null;
+      peerConnection = null;
+      whipResourceUrl = null;
+      offerData = null;
+      queuedCandidates = [];
+      setSharingUI(false);
+      setStatus('Idle');
+      log('screen share flow reset to idle');
+    }
+
+    shareButton.addEventListener('click', async () => {
+      try {
+        await startSharing();
+      } catch (error) {
+        logError('could not start sharing', error);
+        await stopSharing();
+        setStatus(error.message || 'Could not start sharing.');
+      }
+    });
+
+    stopButton.addEventListener('click', () => {
+      stopSharing().catch(error => {
+        logError('could not stop cleanly', error);
+        setStatus('Could not stop cleanly.');
+      });
+    });
+  </script>
+</body>
+</html>
