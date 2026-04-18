@@ -64,6 +64,12 @@ func TestGenerateConfig(t *testing.T) {
 	if want := "hlsVariant: mpegts"; !strings.Contains(config, want) {
 		t.Fatalf("config missing HLS compatibility setting: %q", want)
 	}
+	if want := "hlsSegmentCount: 3"; !strings.Contains(config, want) {
+		t.Fatalf("config missing HLS segment count tuning: %q", want)
+	}
+	if want := "hlsSegmentDuration: 1s"; !strings.Contains(config, want) {
+		t.Fatalf("config missing HLS segment duration tuning: %q", want)
+	}
 }
 
 func TestValidateBinaryPath(t *testing.T) {

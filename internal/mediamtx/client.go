@@ -200,6 +200,8 @@ apiAddress: 127.0.0.1:9997
 
 hlsAlwaysRemux: yes
 hlsVariant: mpegts
+hlsSegmentCount: 3
+hlsSegmentDuration: 1s
 
 paths:
   screenshare:

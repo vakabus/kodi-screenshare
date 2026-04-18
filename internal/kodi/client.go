@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	streamReadyTimeout  = 5 * time.Second
+	streamReadyTimeout  = 12 * time.Second
 	streamReadyInterval = 250 * time.Millisecond
 )
 
