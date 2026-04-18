@@ -12,6 +12,7 @@ import (
 func TestOpen(t *testing.T) {
 	t.Parallel()
 
+	var methods []string
 	var got rpcRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/jsonrpc" {
@@ -23,6 +24,7 @@ func TestOpen(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
+		methods = append(methods, got.Method)
 		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
@@ -32,8 +34,8 @@ func TestOpen(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	if got.Method != "Player.Open" {
-		t.Fatalf("expected Player.Open, got %q", got.Method)
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
+		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 	params, ok := got.Params.(map[string]any)
 	if !ok {
@@ -51,13 +53,21 @@ func TestOpen(t *testing.T) {
 func TestOpenRetriesTransientRPCFailure(t *testing.T) {
 	t.Parallel()
 
-	var postCount int
+	var methods []string
+	var openAttempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		postCount++
-		if postCount == 1 {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		methods = append(methods, req.Method)
+		if req.Method == "Player.Open" {
+			openAttempts++
+		}
+		if req.Method == "Player.Open" && openAttempts == 1 {
 			http.Error(w, "temporary failure", http.StatusBadGateway)
 			return
 		}
@@ -69,19 +79,32 @@ func TestOpenRetriesTransientRPCFailure(t *testing.T) {
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if postCount != 2 {
-		t.Fatalf("expected retry after transient RPC failure, got %d attempts", postCount)
+	if openAttempts != 2 {
+		t.Fatalf("expected retry after transient RPC failure, got %d Player.Open attempts", openAttempts)
+	}
+	if len(methods) != 3 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" || methods[2] != "Player.Open" {
+		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
 
 func TestOpenFailsWhenRPCNeverSucceeds(t *testing.T) {
 	t.Parallel()
 
+	var openAttempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		http.Error(w, "still failing", http.StatusBadGateway)
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method == "Player.Open" {
+			openAttempts++
+			http.Error(w, "still failing", http.StatusBadGateway)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
@@ -92,6 +115,39 @@ func TestOpenFailsWhenRPCNeverSucceeds(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "open Kodi stream at rtsp://stream.example:8554/screenshare") {
 		t.Fatalf("expected RTSP open error, got %v", err)
+	}
+	if openAttempts != openRetryCount {
+		t.Fatalf("expected %d Player.Open attempts, got %d", openRetryCount, openAttempts)
+	}
+	if client.consumeWokeDisplay() {
+		t.Fatal("expected failed Open() to clear wake-tracking state")
+	}
+}
+
+func TestOpenContinuesWhenWakeFails(t *testing.T) {
+	t.Parallel()
+
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		methods = append(methods, req.Method)
+		if req.Method == "Addons.ExecuteAddon" {
+			http.Error(w, "addon missing", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "rtsp://stream.example:8554/screenshare", "", "", server.Client())
+	if err := client.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
+		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
 
@@ -132,9 +188,63 @@ func TestStop(t *testing.T) {
 	}
 }
 
+func TestStopSendsStandbyWhenWakeWasTracked(t *testing.T) {
+	t.Parallel()
+
+	var methods []string
+	var commands []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		methods = append(methods, req.Method)
+
+		switch req.Method {
+		case "Player.GetActivePlayers":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": []map[string]any{{"playerid": 1, "type": "video"}},
+			})
+		case "Player.Stop":
+			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
+		case "Addons.ExecuteAddon":
+			params, ok := req.Params.(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected params type: %T", req.Params)
+			}
+			addonParams, ok := params["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected addon params type: %T", params["params"])
+			}
+			commands = append(commands, addonParams["command"].(string))
+			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "ignored", "", "", server.Client())
+	client.setWokeDisplay(true)
+	if err := client.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	if len(methods) != 3 {
+		t.Fatalf("expected 3 RPC calls, got %d", len(methods))
+	}
+	if methods[0] != "Player.GetActivePlayers" || methods[1] != "Player.Stop" || methods[2] != "Addons.ExecuteAddon" {
+		t.Fatalf("unexpected method sequence: %#v", methods)
+	}
+	if len(commands) != 1 || commands[0] != "standby" {
+		t.Fatalf("unexpected addon commands: %#v", commands)
+	}
+}
+
 func TestOpenWithBasicAuth(t *testing.T) {
 	t.Parallel()
 
+	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/jsonrpc" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -146,6 +256,11 @@ func TestOpenWithBasicAuth(t *testing.T) {
 		if username != "kodi" || password != "secret" {
 			t.Fatalf("unexpected basic auth credentials: %q / %q", username, password)
 		}
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		methods = append(methods, req.Method)
 		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
@@ -153,6 +268,9 @@ func TestOpenWithBasicAuth(t *testing.T) {
 	client := NewClient(server.URL+"/jsonrpc", "rtsp://stream.example:8554/screenshare", "kodi", "secret", server.Client())
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
+	}
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
+		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
 

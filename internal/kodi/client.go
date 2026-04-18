@@ -6,22 +6,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 )
 
 const (
 	openRetryCount = 3
 	openRetryDelay = 500 * time.Millisecond
+	wakeAddonID    = "script.kodi-screenshare-cec"
 )
 
 type Client struct {
-	endpoint   string
-	streamURL  string
-	username   string
-	password   string
-	httpClient *http.Client
+	endpoint    string
+	streamURL   string
+	username    string
+	password    string
+	httpClient  *http.Client
+	mu          sync.Mutex
+	wokeDisplay bool
 }
 
 type activePlayer struct {
@@ -69,6 +74,13 @@ func NewClient(endpoint, streamURL, username, password string, httpClient *http.
 }
 
 func (c *Client) Open(ctx context.Context) error {
+	wokeDisplay := false
+	if err := c.wakeDisplay(ctx); err != nil {
+		log.Printf("Kodi CEC wake failed (continuing with playback): %v", err)
+	} else {
+		wokeDisplay = true
+	}
+
 	req := rpcRequest{
 		JSONRPC: "2.0",
 		Method:  "Player.Open",
@@ -83,6 +95,7 @@ func (c *Client) Open(ctx context.Context) error {
 	var lastErr error
 	for attempt := 1; attempt <= openRetryCount; attempt++ {
 		if err := c.call(ctx, req, nil); err == nil {
+			c.setWokeDisplay(wokeDisplay)
 			return nil
 		} else {
 			lastErr = err
@@ -101,10 +114,36 @@ func (c *Client) Open(ctx context.Context) error {
 		}
 	}
 
+	c.setWokeDisplay(false)
 	return fmt.Errorf("open Kodi stream at %s: %w", c.streamURL, lastErr)
 }
 
+func (c *Client) wakeDisplay(ctx context.Context) error {
+	return c.executeCECCommand(ctx, "activate")
+}
+
+func (c *Client) standbyDisplay(ctx context.Context) error {
+	return c.executeCECCommand(ctx, "standby")
+}
+
+func (c *Client) executeCECCommand(ctx context.Context, command string) error {
+	return c.call(ctx, rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "Addons.ExecuteAddon",
+		Params: map[string]any{
+			"addonid": wakeAddonID,
+			"params": map[string]string{
+				"command": command,
+			},
+			"wait": true,
+		},
+		ID: 1,
+	}, nil)
+}
+
 func (c *Client) Stop(ctx context.Context) error {
+	shouldStandby := c.consumeWokeDisplay()
+
 	var players []activePlayer
 	if err := c.call(ctx, rpcRequest{
 		JSONRPC: "2.0",
@@ -127,7 +166,27 @@ func (c *Client) Stop(ctx context.Context) error {
 		}
 	}
 
+	if shouldStandby {
+		if err := c.standbyDisplay(ctx); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func (c *Client) setWokeDisplay(woke bool) {
+	c.mu.Lock()
+	c.wokeDisplay = woke
+	c.mu.Unlock()
+}
+
+func (c *Client) consumeWokeDisplay() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	woke := c.wokeDisplay
+	c.wokeDisplay = false
+	return woke
 }
 
 func (c *Client) call(ctx context.Context, rpcReq rpcRequest, out any) error {
@@ -172,6 +231,7 @@ func (c *Client) call(ctx context.Context, rpcReq rpcRequest, out any) error {
 
 	return nil
 }
+
 func parseEndpointCredentials(rawEndpoint string) (endpoint, username, password string) {
 	endpoint = rawEndpoint
 	parsedURL, err := url.Parse(rawEndpoint)

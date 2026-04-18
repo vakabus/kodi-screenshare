@@ -20,7 +20,9 @@ Meeting rooms currently rely on hardware dongles (Chromecast, Airtame) or comple
 2. **WebRTC Ingestion:** The system must capture the presenter's screen using the browser's native `getDisplayMedia` API and transmit it via WebRTC for low-latency streaming.
 3. **Format Conversion:** The system must transmux the incoming WebRTC stream into a format natively supported by Kodi (such as RTMP or HLS) without heavy CPU transcoding.
 4. **Automated Kodi Playback:** The moment a screen share begins, the system must automatically command Kodi (via its JSON-RPC API) to open and display the stream on the TV.
-5. **Single-Node Deployment:** The entire server infrastructure (Web UI hosting, WebRTC server, and Kodi controller) must run locally on the same Raspberry Pi 5 that runs LibreELEC.
+5. **TV Wake on Share Start:** If the TV is off and Kodi can control it via HDMI-CEC, the system should wake the TV and activate the Kodi input when a screen share starts.
+6. **Conditional TV Standby on Share End:** When a screen share ends, the system should return the TV to standby only if this session previously woke the TV via HDMI-CEC, to avoid turning off a display that was already in use for another purpose.
+7. **Single-Node Deployment:** The entire server infrastructure (Web UI hosting, WebRTC server, and Kodi controller) must run locally on the same Raspberry Pi 5 that runs LibreELEC.
 
 ## 5. Non-Functional Requirements
 
@@ -31,10 +33,12 @@ Meeting rooms currently rely on hardware dongles (Chromecast, Airtame) or comple
 
 ## 6. User Flow
 
-1. User walks into the meeting room. TV displays the idle Kodi home screen.
+1. User walks into the meeting room. The TV may already be on and showing the idle Kodi home screen, or it may be off in standby.
 2. A sign on the wall says: "Go to `http://tv.local` to share your screen."
 3. User opens the URL on their laptop and clicks a "Share Screen" button.
 4. The browser prompts the user to select which window/screen to share.
 5. User selects the screen.
-6. The TV immediately switches from the Kodi home screen to the live feed of the user's laptop.
-7. User clicks "Stop Sharing" on the web page, and Kodi returns to its home screen.
+6. If the TV is off and HDMI-CEC is available, Kodi wakes the TV and activates itself as the display source.
+7. The TV switches from the Kodi home screen to the live feed of the user's laptop.
+8. User clicks "Stop Sharing" on the web page, and Kodi stops playback.
+9. If this sharing session previously woke the TV, the system returns the TV to standby; otherwise Kodi simply returns to its home screen without powering the TV off.

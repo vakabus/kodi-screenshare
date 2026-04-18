@@ -1,11 +1,11 @@
-# Technical Design Document: Kodi WebRTC-to-HLS Screen Share Bridge
+# Technical Design Document: Kodi WebRTC-to-RTSP Screen Share Bridge
 
 ## 1. System Architecture
 
 The system consists of two processes running on the LibreELEC Raspberry Pi 5:
 
 1. **A custom Go application** — the main orchestrator, serving the web UI, managing session state, and controlling Kodi.
-2. **MediaMTX v1.17.1** — run as a **sidecar subprocess** managed by the Go app, handling WebRTC ingest and HLS transmuxing.
+2. **MediaMTX v1.17.1** — run as a **sidecar subprocess** managed by the Go app, handling WebRTC ingest and exposing the live stream for Kodi playback over RTSP.
 
 > **Why not embed MediaMTX?** MediaMTX's entire codebase is under Go's `internal/` package convention, and the maintainer has explicitly refused to expose a public embedding API ([issue #4011](https://github.com/bluenviron/mediamtx/issues/4011), [PR #4020](https://github.com/bluenviron/mediamtx/pull/4020) — both closed). The Go app will instead launch the MediaMTX binary as a child process and communicate via MediaMTX's config hooks and REST API.
 
@@ -13,7 +13,7 @@ The Go application has three core responsibilities:
 
 1. **HTTP Web Server (port 80):** Serves the static HTML/JS frontend to presenters.
 2. **Session & Lifecycle Manager:** Tracks active sharing sessions, enforces single-presenter policy, and bridges MediaMTX events to Kodi commands.
-3. **Kodi JSON-RPC Controller:** Triggers Kodi playback commands based on stream state events.
+3. **Kodi JSON-RPC + CEC Controller:** Triggers Kodi playback commands based on stream state events and coordinates HDMI-CEC wake / conditional standby behavior through a bundled Kodi addon.
 
 ### Architecture Diagram (Logical Flow)
 
@@ -25,17 +25,17 @@ The Go application has three core responsibilities:
         v
 [ MediaMTX (sidecar subprocess) ]
         |
-        |-- Receives WebRTC -> Transmuxes to HLS (:8888)
+	        |-- Receives WebRTC -> Exposes RTSP stream (:8554)
         |-- runOnReady hook -> HTTP POST :80/api/hooks/ready
         |-- runOnNotReady hook -> HTTP POST :80/api/hooks/not-ready
         v
 [ Go Application (port 80) ]
         |
-        | 3. HTTP POST (JSON-RPC playback command)
+        | 3. HTTP POST (JSON-RPC playback / CEC command)
         v
 [ Kodi Web Server (localhost:8080) ]
         |
-        | 4. Kodi internal player pulls HLS stream
+	        | 4. Kodi internal player pulls RTSP stream
         v
 [ TV Display ]
 ```
@@ -45,7 +45,7 @@ The Go application has three core responsibilities:
 | Port | Service | Protocol |
 |------|---------|----------|
 | 80 | Go app — Web UI + API | HTTP |
-| 8888 | MediaMTX — HLS output | HTTP |
+| 8554 | MediaMTX — RTSP output | RTSP |
 | 8889 | MediaMTX — WebRTC WHIP ingest | HTTP |
 | 8080 | Kodi — JSON-RPC API (pre-existing) | HTTP |
 | 9997 | MediaMTX — Control REST API | HTTP |
@@ -70,7 +70,7 @@ const stream = await navigator.mediaDevices.getDisplayMedia({
 
 #### H.264 Codec Enforcement
 
-The browser **must** send H.264 (not VP8/VP9) so MediaMTX can transmux to HLS without CPU-heavy transcoding. This is achieved using `RTCRtpTransceiver.setCodecPreferences()`, which is [Baseline 2024](https://caniuse.com/mdn-api_rtcrtptransceiver_setcodecpreferences) — supported in Chrome 76+, Firefox 128+, Safari 17.4+, Edge 79+:
+The browser **must** send H.264 (not VP8/VP9) so MediaMTX can forward the video into Kodi-compatible playback formats without CPU-heavy transcoding. This is achieved using `RTCRtpTransceiver.setCodecPreferences()`, which is [Baseline 2024](https://caniuse.com/mdn-api_rtcrtptransceiver_setcodecpreferences) — supported in Chrome 76+, Firefox 128+, Safari 17.4+, Edge 79+:
 
 ```js
 const pc = new RTCPeerConnection();
@@ -84,7 +84,7 @@ No raw SDP munging is required.
 
 #### WHIP Publishing
 
-Implements a WebRTC WHIP client. It creates an `RTCPeerConnection`, adds the video track, and POSTs the SDP offer to `http://<pi-ip>:8889/screenshare/whip`. The WHIP endpoint is handled natively by MediaMTX.
+Implements a WebRTC WHIP client. It creates an `RTCPeerConnection`, adds the video track, and POSTs the SDP offer to `http://<pi-ip>:8889/screenshare/whip`. The WHIP endpoint is handled natively by MediaMTX. The frontend also performs the follow-up WHIP steps needed for stable browser publishing: it requests ICE server information, applies the SDP answer, and PATCHes trickled ICE candidates after the session URL is established.
 
 #### Frontend State Machine
 
@@ -114,7 +114,10 @@ MediaMTX configuration (generated at startup as a temp YAML file):
 api: yes
 apiAddress: 127.0.0.1:9997
 
-hlsAlwaysRemux: yes    # generate HLS segments immediately, not on-demand, to avoid startup latency
+	hlsAlwaysRemux: yes    # HLS remains available for diagnostics/compatibility experiments
+	hlsVariant: mpegts
+	hlsSegmentCount: 3
+	hlsSegmentDuration: 1s
 
 paths:
   screenshare:
@@ -146,8 +149,8 @@ type SessionState struct {
 | `/` | GET | Serve the frontend SPA |
 | `/api/status` | GET | Returns `{"active": true/false}` — used by frontend to check availability |
 | `/api/takeover` | POST | Stops current stream (via MediaMTX REST API: `GET /v3/webrtcsessions/list` to find the session, then `POST /v3/webrtcsessions/kick/{id}` to disconnect the publisher), allowing new presenter |
-| `/api/hooks/ready` | POST | Called by MediaMTX `runOnReady` — triggers Kodi `Player.Open` |
-| `/api/hooks/not-ready` | POST | Called by MediaMTX `runOnNotReady` — triggers Kodi `Player.Stop` |
+| `/api/hooks/ready` | POST | Called by MediaMTX `runOnReady` — triggers Kodi wake + `Player.Open` |
+| `/api/hooks/not-ready` | POST | Called by MediaMTX `runOnNotReady` — triggers Kodi `Player.Stop` and conditional standby |
 
 #### Multi-Presenter Handling
 
@@ -157,9 +160,28 @@ When a second presenter tries to share while someone is already active:
 3. If confirmed, frontend calls `POST /api/takeover`, which uses the MediaMTX REST API to kick the current publisher: first `GET http://127.0.0.1:9997/v3/webrtcsessions/list` to find the active session ID, then `POST http://127.0.0.1:9997/v3/webrtcsessions/kick/{id}` to disconnect it. The `runOnNotReady` hook fires, stopping Kodi playback. Then the new presenter's WHIP connection proceeds normally.
 
 
-### 2.3. Kodi JSON-RPC Controller
+### 2.3. Kodi JSON-RPC + HDMI-CEC Controller
 
 When the `/api/hooks/ready` endpoint is hit, the Go app sends:
+
+1. A best-effort HDMI-CEC wake command through Kodi addon execution:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "Addons.ExecuteAddon",
+  "params": {
+    "addonid": "script.kodi-screenshare-cec",
+    "params": {
+      "command": "activate"
+    },
+    "wait": true
+  },
+  "id": 1
+}
+```
+
+2. The RTSP playback command:
 
 ```json
 {
@@ -167,7 +189,7 @@ When the `/api/hooks/ready` endpoint is hit, the Go app sends:
   "method": "Player.Open",
   "params": {
     "item": {
-      "file": "http://127.0.0.1:8888/screenshare/stream.m3u8"
+	      "file": "rtsp://<bridge-lan-ip>:8554/screenshare"
     }
   },
   "id": 1
@@ -175,15 +197,17 @@ When the `/api/hooks/ready` endpoint is hit, the Go app sends:
 ```
 
 - **API Endpoint:** `http://127.0.0.1:8080/jsonrpc`
-- **Stop Event:** When `/api/hooks/not-ready` fires (stream ended), the Go app sends `Player.Stop` to return Kodi to its home screen.
+- **Wake transport:** Kodi JSON-RPC does not expose direct builtin execution for HDMI-CEC commands, so the Go app invokes a small bundled Kodi addon (`script.kodi-screenshare-cec`) using `Addons.ExecuteAddon`. That addon runs `xbmc.executebuiltin('CECActivateSource()')`, `CECStandby()`, or `CECToggleState()` on the Kodi side.
+- **Stop Event:** When `/api/hooks/not-ready` fires (stream ended), the Go app sends `Player.Stop`. If this session had previously issued a successful wake command, it then sends a matching standby command through the addon so the TV powers down only when the app believes it woke it earlier.
 
-### 2.4. Output Format: HLS
+### 2.4. Output Format: RTSP for Kodi Playback
 
-The system uses **HLS** (HTTP Live Streaming) as the output format for Kodi playback.
+The system uses **RTSP** as the primary output format for Kodi playback.
 
-- **Rationale:** HLS has rock-solid native support in Kodi with no additional addons. RTMP would offer lower latency (~0.5–1s vs HLS's ~2–5s) but Kodi's RTMP support is inconsistent and may require the inputstream addon.
-- **Trade-off accepted:** 2–5s latency is acceptable for the slide deck / meeting room use case.
-- **MediaMTX transmuxing:** Because the browser sends H.264 via WebRTC, MediaMTX simply repackages the H.264 NAL units into HLS `.m3u8` segments — no transcoding, near-zero CPU usage on the Pi 5.
+- **Rationale:** RTSP provides substantially lower end-to-end delay for Kodi than HLS in this deployment while keeping playback stable and avoiding transcoding.
+- **Observed behavior:** In local testing, RTSP playback through Kodi was stable and reduced end-to-end delay to roughly 4 seconds, versus roughly 13 seconds for the best stable HLS variant.
+- **MediaMTX forwarding:** Because the browser sends H.264 via WebRTC, MediaMTX can expose the same stream over RTSP without CPU-heavy transcoding.
+- **HLS status:** HLS generation remains enabled inside MediaMTX for troubleshooting and compatibility experiments, but Kodi playback is designed around RTSP.
 
 
 ## 3. Implementation Details
@@ -212,23 +236,24 @@ kodi-screenshare/
 
 ### Configuration
 
-All ports and addresses are hardcoded constants for v1. No config file or environment variable support.
+The runtime exposes configurable listen / endpoint / stream-host values so the same binary can be used both on the target LibreELEC box and during LAN-based development against a separate Kodi host.
 
 ### Build and Deployment
 
 - The Go application will be compiled statically for the `arm64` architecture (to run on the Raspberry Pi 5).
 - The MediaMTX v1.17.1 `arm64` binary will be bundled alongside the Go binary (downloaded from [MediaMTX releases](https://github.com/bluenviron/mediamtx/releases/tag/v1.17.1)).
 - LibreELEC does not have a standard package manager, so both binaries can be copied to the `/storage/.config/` directory.
+- The bundled Kodi HDMI-CEC addon (`script.kodi-screenshare-cec`) must also be copied into Kodi's addons directory (for LibreELEC: `/storage/.kodi/addons/`) and enabled.
 - A custom `systemd` service file will be created in `/storage/.config/system.d/webrtc-bridge.service` to ensure the Go application (which in turn manages MediaMTX) starts automatically when LibreELEC boots.
 
 ### Audio
 
 Audio is **excluded in v1** (`audio: false` in `getDisplayMedia`). The architecture supports adding audio later by:
 1. Changing the `getDisplayMedia` constraint to `audio: true`.
-2. MediaMTX will automatically include the audio track in the HLS output.
-3. No changes needed in the Go backend or Kodi controller — `Player.Open` plays whatever the HLS stream contains.
+2. MediaMTX will automatically include the audio track in the outgoing stream.
+3. No changes needed in the Go backend or Kodi controller — `Player.Open` plays whatever the RTSP stream contains.
 
 ### Future Considerations
 
-- **Lower latency:** If HLS latency proves problematic, MediaMTX supports LL-HLS (Low-Latency HLS) which can reduce delay to ~1–2s, though Kodi's LL-HLS support should be validated first.
-- **RTMP fallback:** Could be added as an admin-configurable option if a Kodi setup with proper RTMP support is available.
+- **Direct power-state awareness:** The current HDMI-CEC logic tracks whether this app successfully issued a wake command, but it does not read the TV's real power state. If a robust query path becomes available, standby behavior could become more precise.
+- **Alternative playback transports:** RTMP or future direct WebRTC playback on the receiver side could still be explored if lower latency or broader player compatibility is needed.
