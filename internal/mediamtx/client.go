@@ -206,9 +206,9 @@ hlsSegmentDuration: 1s
 paths:
   screenshare:
     runOnReady: >
-      curl -s -X POST %s/api/hooks/ready
+      curl -sk -X POST %s/api/hooks/ready
     runOnReadyRestart: no
     runOnNotReady: >
-      curl -s -X POST %s/api/hooks/not-ready
+      curl -sk -X POST %s/api/hooks/not-ready
 `, baseURL, baseURL)
 }

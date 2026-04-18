@@ -74,10 +74,15 @@ func NewClient(endpoint, streamURL, username, password string, httpClient *http.
 }
 
 func (c *Client) Open(ctx context.Context) error {
+	displayAlreadyOn := false
+	if active, err := c.isScreenSaverActive(ctx); err == nil && !active {
+		displayAlreadyOn = true
+	}
+
 	wokeDisplay := false
 	if err := c.wakeDisplay(ctx); err != nil {
 		log.Printf("Kodi CEC wake failed (continuing with playback): %v", err)
-	} else {
+	} else if !displayAlreadyOn {
 		wokeDisplay = true
 	}
 
@@ -116,6 +121,21 @@ func (c *Client) Open(ctx context.Context) error {
 
 	c.setWokeDisplay(false)
 	return fmt.Errorf("open Kodi stream at %s: %w", c.streamURL, lastErr)
+}
+
+func (c *Client) isScreenSaverActive(ctx context.Context) (bool, error) {
+	var result map[string]bool
+	if err := c.call(ctx, rpcRequest{
+		JSONRPC: "2.0",
+		Method:  "XBMC.GetInfoBooleans",
+		Params: map[string]any{
+			"booleans": []string{"System.ScreenSaverActive"},
+		},
+		ID: 1,
+	}, &result); err != nil {
+		return false, err
+	}
+	return result["System.ScreenSaverActive"], nil
 }
 
 func (c *Client) wakeDisplay(ctx context.Context) error {

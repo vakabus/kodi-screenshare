@@ -2,16 +2,23 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -22,10 +29,11 @@ import (
 )
 
 const (
-	defaultHTTPListenAddr  = ":80"
+	defaultHTTPListenAddr  = ":443"
 	defaultMediaAPIBaseURL = "http://127.0.0.1:9997"
 	defaultKodiAPIEndpoint = "http://127.0.0.1:8080/jsonrpc"
 	defaultStreamHost      = "127.0.0.1"
+	defaultWhipBaseURL     = "http://127.0.0.1:8889"
 	rtspStreamPort         = "8554"
 	pathName               = "screenshare"
 )
@@ -37,13 +45,19 @@ func main() {
 	var kodiUsername string
 	var kodiPassword string
 	var streamHost string
+	var tlsCert string
+	var tlsKey string
+	var mediamtxPath string
 
-	flag.StringVar(&listenAddr, "listen-addr", defaultHTTPListenAddr, "HTTP listen address for the web UI and API")
-	flag.StringVar(&hookBaseURL, "hook-base-url", "", "Base URL for MediaMTX hooks to call back into, e.g. http://127.0.0.1:8081")
+	flag.StringVar(&listenAddr, "listen-addr", defaultHTTPListenAddr, "HTTPS listen address for the web UI and API")
+	flag.StringVar(&hookBaseURL, "hook-base-url", "", "Base URL for MediaMTX hooks to call back into, e.g. https://127.0.0.1:443")
 	flag.StringVar(&kodiEndpoint, "kodi-endpoint", defaultKodiAPIEndpoint, "Kodi JSON-RPC endpoint")
 	flag.StringVar(&kodiUsername, "kodi-username", "", "Kodi web server username for HTTP basic auth")
 	flag.StringVar(&kodiPassword, "kodi-password", "", "Kodi web server password for HTTP basic auth")
 	flag.StringVar(&streamHost, "stream-host", defaultStreamHost, "Host or IP address Kodi should use for the RTSP stream")
+	flag.StringVar(&tlsCert, "tls-cert", "", "Path to TLS certificate file (auto-generated if empty)")
+	flag.StringVar(&tlsKey, "tls-key", "", "Path to TLS private key file (auto-generated if empty)")
+	flag.StringVar(&mediamtxPath, "mediamtx-path", "mediamtx", "Path to the MediaMTX binary")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "webrtc-bridge: ", log.LstdFlags|log.Lmsgprefix)
@@ -63,8 +77,8 @@ func main() {
 	streamURL := buildRTSPStreamURL(streamHost)
 	kodiClient := kodi.NewClient(kodiEndpoint, streamURL, kodiUsername, kodiPassword, httpClient)
 	mediaClient := mediamtx.NewAPIClient(defaultMediaAPIBaseURL, pathName, httpClient)
-	app := server.New(state, kodiClient, mediaClient)
-	manager := mediamtx.NewManager(filepath.Join(".", "third_party", "mediamtx", "mediamtx"), hookBaseURL, logger)
+	app := server.New(state, kodiClient, mediaClient, defaultWhipBaseURL)
+	manager := mediamtx.NewManager(mediamtxPath, hookBaseURL, logger)
 
 	go func() {
 		if err := manager.Run(ctx); err != nil && ctx.Err() == nil {
@@ -72,10 +86,24 @@ func main() {
 		}
 	}()
 
+	var tlsConfig *tls.Config
+	if tlsCert == "" || tlsKey == "" {
+		cert, err := generateSelfSignedCert()
+		if err != nil {
+			logger.Fatalf("generate self-signed certificate: %v", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		logger.Printf("using auto-generated self-signed TLS certificate")
+	}
+
 	httpServer := &http.Server{
 		Addr:              listenAddr,
 		Handler:           app.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
 
 	go func() {
@@ -85,10 +113,10 @@ func main() {
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
 
-	logger.Printf("serving web UI and API on %s", listenAddr)
+	logger.Printf("serving web UI and API on %s (HTTPS)", listenAddr)
 	logger.Printf("Kodi will open RTSP stream at %s", streamURL)
-	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Fatalf("HTTP server stopped: %v", err)
+	if err := httpServer.ListenAndServeTLS(tlsCert, tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Fatalf("HTTPS server stopped: %v", err)
 	}
 }
 
@@ -103,7 +131,44 @@ func deriveHookBaseURL(listenAddr string) (string, error) {
 		host = "127.0.0.1"
 	}
 
-	return "http://" + net.JoinHostPort(host, port), nil
+	return "https://" + net.JoinHostPort(host, port), nil
+}
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate ECDSA key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject:      pkix.Name{CommonName: "kodi-screenshare"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		DNSNames:     []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("create certificate: %w", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("marshal private key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
 func buildRTSPStreamURL(host string) string {

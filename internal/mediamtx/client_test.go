@@ -52,10 +52,10 @@ func TestGenerateConfig(t *testing.T) {
 	t.Parallel()
 
 	config := GenerateConfig("http://127.0.0.1:80/")
-	if want := "curl -s -X POST http://127.0.0.1:80/api/hooks/ready"; !strings.Contains(config, want) {
+	if want := "curl -sk -X POST http://127.0.0.1:80/api/hooks/ready"; !strings.Contains(config, want) {
 		t.Fatalf("config missing ready hook: %q", want)
 	}
-	if want := "curl -s -X POST http://127.0.0.1:80/api/hooks/not-ready"; !strings.Contains(config, want) {
+	if want := "curl -sk -X POST http://127.0.0.1:80/api/hooks/not-ready"; !strings.Contains(config, want) {
 		t.Fatalf("config missing not-ready hook: %q", want)
 	}
 	if want := "apiAddress: 127.0.0.1:9997"; !strings.Contains(config, want) {

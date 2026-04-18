@@ -40,7 +40,7 @@ func TestStatusHooksAndTakeover(t *testing.T) {
 	state := session.NewState()
 	kodi := &fakeKodi{}
 	media := &fakeMedia{}
-	srv := New(state, kodi, media)
+	srv := New(state, kodi, media, "")
 	handler := srv.Handler()
 
 	statusReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)

@@ -11,10 +11,10 @@ func TestDeriveHookBaseURL(t *testing.T) {
 		want       string
 		wantErr    bool
 	}{
-		{name: "port only", listenAddr: ":8081", want: "http://127.0.0.1:8081"},
-		{name: "wildcard host", listenAddr: "0.0.0.0:8081", want: "http://127.0.0.1:8081"},
-		{name: "specific host", listenAddr: "192.168.1.50:8081", want: "http://192.168.1.50:8081"},
-		{name: "named host", listenAddr: "localhost:8081", want: "http://localhost:8081"},
+		{name: "port only", listenAddr: ":8081", want: "https://127.0.0.1:8081"},
+		{name: "wildcard host", listenAddr: "0.0.0.0:8081", want: "https://127.0.0.1:8081"},
+		{name: "specific host", listenAddr: "192.168.1.50:8081", want: "https://192.168.1.50:8081"},
+		{name: "named host", listenAddr: "localhost:8081", want: "https://localhost:8081"},
 		{name: "invalid address", listenAddr: "8081", wantErr: true},
 	}
 

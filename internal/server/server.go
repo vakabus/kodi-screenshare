@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 
 	webui "github.com/vakabus/kodi-screenshare/web"
 )
@@ -24,16 +27,18 @@ type MediaController interface {
 }
 
 type Server struct {
-	session SessionState
-	kodi    KodiController
-	media   MediaController
+	session    SessionState
+	kodi       KodiController
+	media      MediaController
+	whipBaseURL string
 }
 
-func New(session SessionState, kodi KodiController, media MediaController) *Server {
+func New(session SessionState, kodi KodiController, media MediaController, whipBaseURL string) *Server {
 	return &Server{
-		session: session,
-		kodi:    kodi,
-		media:   media,
+		session:    session,
+		kodi:       kodi,
+		media:      media,
+		whipBaseURL: whipBaseURL,
 	}
 }
 
@@ -43,8 +48,43 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/takeover", s.handleTakeover)
 	mux.HandleFunc("/api/hooks/ready", s.handleReady)
 	mux.HandleFunc("/api/hooks/not-ready", s.handleNotReady)
+	if s.whipBaseURL != "" {
+		mux.Handle("/screenshare/", s.whipReverseProxy())
+	}
 	mux.Handle("/", http.FileServer(http.FS(webui.Assets)))
 	return mux
+}
+
+func (s *Server) whipReverseProxy() http.Handler {
+	target, err := url.Parse(s.whipBaseURL)
+	if err != nil {
+		log.Fatalf("parse WHIP base URL %q: %v", s.whipBaseURL, err)
+	}
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = target.Scheme
+			req.URL.Host = target.Host
+			req.Host = target.Host
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			loc := resp.Header.Get("Location")
+			if loc == "" {
+				return nil
+			}
+			parsed, err := url.Parse(loc)
+			if err != nil {
+				return nil
+			}
+			if parsed.IsAbs() && strings.HasPrefix(parsed.Path, "/screenshare/") {
+				parsed.Scheme = ""
+				parsed.Host = ""
+				resp.Header.Set("Location", parsed.String())
+			}
+			return nil
+		},
+	}
+	return proxy
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

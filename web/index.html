@@ -208,7 +208,7 @@
       await ensureAvailability();
 
       setStatus('Connecting...');
-      const whipUrl = `http://${location.hostname}:8889/screenshare/whip`;
+      const whipUrl = '/screenshare/whip';
       const iceServers = await requestIceServers(whipUrl);
       peerConnection = new RTCPeerConnection({ iceServers, sdpSemantics: 'unified-plan' });
       log('created RTCPeerConnection', { iceServers: iceServers.length });
