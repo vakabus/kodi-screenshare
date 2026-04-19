@@ -9,14 +9,17 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	openRetryCount = 3
-	openRetryDelay = 500 * time.Millisecond
-	wakeAddonID    = "script.kodi-screenshare-cec"
+	openRetryCount   = 3
+	openRetryDelay   = 500 * time.Millisecond
+	wakeAddonID      = "script.kodi-screenshare-cec"
+	cecQueryTimeout  = 5 * time.Second
 )
 
 type Client struct {
@@ -74,15 +77,15 @@ func NewClient(endpoint, streamURL, username, password string, httpClient *http.
 }
 
 func (c *Client) Open(ctx context.Context) error {
-	displayAlreadyOn := false
-	if active, err := c.isScreenSaverActive(ctx); err == nil && !active {
-		displayAlreadyOn = true
+	tvAlreadyOn := isTVPoweredOn(ctx)
+	if tvAlreadyOn {
+		log.Printf("TV is already powered on (CEC), will not send standby on stop")
 	}
 
 	wokeDisplay := false
 	if err := c.wakeDisplay(ctx); err != nil {
 		log.Printf("Kodi CEC wake failed (continuing with playback): %v", err)
-	} else if !displayAlreadyOn {
+	} else if !tvAlreadyOn {
 		wokeDisplay = true
 	}
 
@@ -123,19 +126,24 @@ func (c *Client) Open(ctx context.Context) error {
 	return fmt.Errorf("open Kodi stream at %s: %w", c.streamURL, lastErr)
 }
 
-func (c *Client) isScreenSaverActive(ctx context.Context) (bool, error) {
-	var result map[string]bool
-	if err := c.call(ctx, rpcRequest{
-		JSONRPC: "2.0",
-		Method:  "XBMC.GetInfoBooleans",
-		Params: map[string]any{
-			"booleans": []string{"System.ScreenSaverActive"},
-		},
-		ID: 1,
-	}, &result); err != nil {
-		return false, err
+// isTVPoweredOn queries the TV's actual power state via HDMI-CEC using
+// cec-ctl. Returns true only if the TV reports "pwr-state: on".
+// Returns false if the TV is in standby, cec-ctl is unavailable, or
+// the query fails for any reason.
+func isTVPoweredOn(ctx context.Context) bool {
+	queryCtx, cancel := context.WithTimeout(ctx, cecQueryTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(queryCtx, "cec-ctl", "--give-device-power-status", "--to", "/dev/cec1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("CEC power query failed (assuming TV is off): %v", err)
+		return false
 	}
-	return result["System.ScreenSaverActive"], nil
+
+	powered := strings.Contains(strings.ToLower(string(output)), "pwr-state: on")
+	log.Printf("CEC power query: TV powered on = %t", powered)
+	return powered
 }
 
 func (c *Client) wakeDisplay(ctx context.Context) error {
@@ -164,35 +172,41 @@ func (c *Client) executeCECCommand(ctx context.Context, command string) error {
 func (c *Client) Stop(ctx context.Context) error {
 	shouldStandby := c.consumeWokeDisplay()
 
+	var stopErr error
 	var players []activePlayer
 	if err := c.call(ctx, rpcRequest{
 		JSONRPC: "2.0",
 		Method:  "Player.GetActivePlayers",
 		ID:      1,
 	}, &players); err != nil {
-		return err
-	}
-
-	for _, player := range players {
-		if err := c.call(ctx, rpcRequest{
-			JSONRPC: "2.0",
-			Method:  "Player.Stop",
-			Params: map[string]int{
-				"playerid": player.PlayerID,
-			},
-			ID: 1,
-		}, nil); err != nil {
-			return err
+		log.Printf("Player.GetActivePlayers failed: %v", err)
+		stopErr = err
+	} else {
+		for _, player := range players {
+			if err := c.call(ctx, rpcRequest{
+				JSONRPC: "2.0",
+				Method:  "Player.Stop",
+				Params: map[string]int{
+					"playerid": player.PlayerID,
+				},
+				ID: 1,
+			}, nil); err != nil {
+				log.Printf("Player.Stop failed: %v", err)
+				stopErr = err
+			}
 		}
 	}
 
 	if shouldStandby {
 		if err := c.standbyDisplay(ctx); err != nil {
-			return err
+			log.Printf("CEC standby failed: %v", err)
+			if stopErr == nil {
+				stopErr = err
+			}
 		}
 	}
 
-	return nil
+	return stopErr
 }
 
 func (c *Client) setWokeDisplay(woke bool) {

@@ -207,6 +207,7 @@ install: package
       -e 's|%STREAM_HOST%|127.0.0.1|g' \
       "{{deploy_dir}}/webrtc-bridge.service" \
       | ssh "${ssh_opts[@]}" "{{kodi_ssh_host}}" "mkdir -p '{{systemd_dir}}' && cat > '{{systemd_dir}}/webrtc-bridge.service'"
+    ssh "${ssh_opts[@]}" "{{kodi_ssh_host}}" "mkdir -p '{{systemd_dir}}/kodi.target.wants' && ln -sf ../webrtc-bridge.service '{{systemd_dir}}/kodi.target.wants/webrtc-bridge.service'"
     ssh "${ssh_opts[@]}" "{{kodi_ssh_host}}" 'systemctl daemon-reload'
 
     echo "==> Installing CEC addon..."

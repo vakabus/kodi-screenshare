@@ -25,12 +25,7 @@ func TestOpen(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		methods = append(methods, got.Method)
-		switch got.Method {
-		case "XBMC.GetInfoBooleans":
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": true}})
-		default:
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
@@ -39,7 +34,7 @@ func TestOpen(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 
-	if len(methods) != 3 || methods[0] != "XBMC.GetInfoBooleans" || methods[1] != "Addons.ExecuteAddon" || methods[2] != "Player.Open" {
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
 		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 	params, ok := got.Params.(map[string]any)
@@ -69,10 +64,6 @@ func TestOpenRetriesTransientRPCFailure(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		methods = append(methods, req.Method)
-		if req.Method == "XBMC.GetInfoBooleans" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": true}})
-			return
-		}
 		if req.Method == "Player.Open" {
 			openAttempts++
 		}
@@ -91,7 +82,7 @@ func TestOpenRetriesTransientRPCFailure(t *testing.T) {
 	if openAttempts != 2 {
 		t.Fatalf("expected retry after transient RPC failure, got %d Player.Open attempts", openAttempts)
 	}
-	if len(methods) != 4 || methods[0] != "XBMC.GetInfoBooleans" || methods[1] != "Addons.ExecuteAddon" || methods[2] != "Player.Open" || methods[3] != "Player.Open" {
+	if len(methods) != 3 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" || methods[2] != "Player.Open" {
 		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
@@ -107,10 +98,6 @@ func TestOpenFailsWhenRPCNeverSucceeds(t *testing.T) {
 		var req rpcRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
-		}
-		if req.Method == "XBMC.GetInfoBooleans" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": true}})
-			return
 		}
 		if req.Method == "Player.Open" {
 			openAttempts++
@@ -147,10 +134,6 @@ func TestOpenContinuesWhenWakeFails(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		methods = append(methods, req.Method)
-		if req.Method == "XBMC.GetInfoBooleans" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": true}})
-			return
-		}
 		if req.Method == "Addons.ExecuteAddon" {
 			http.Error(w, "addon missing", http.StatusBadRequest)
 			return
@@ -163,7 +146,7 @@ func TestOpenContinuesWhenWakeFails(t *testing.T) {
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if len(methods) != 3 || methods[0] != "XBMC.GetInfoBooleans" || methods[1] != "Addons.ExecuteAddon" || methods[2] != "Player.Open" {
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
 		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
@@ -278,12 +261,7 @@ func TestOpenWithBasicAuth(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		methods = append(methods, req.Method)
-		switch req.Method {
-		case "XBMC.GetInfoBooleans":
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": true}})
-		default:
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
-		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 	}))
 	defer server.Close()
 
@@ -291,12 +269,12 @@ func TestOpenWithBasicAuth(t *testing.T) {
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if len(methods) != 3 || methods[0] != "XBMC.GetInfoBooleans" || methods[1] != "Addons.ExecuteAddon" || methods[2] != "Player.Open" {
+	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
 		t.Fatalf("unexpected method sequence: %#v", methods)
 	}
 }
 
-func TestOpenSkipsStandbyWhenDisplayWasAlreadyOn(t *testing.T) {
+func TestStopSendsStandbyEvenWhenPlayerStopFails(t *testing.T) {
 	t.Parallel()
 
 	var methods []string
@@ -307,34 +285,23 @@ func TestOpenSkipsStandbyWhenDisplayWasAlreadyOn(t *testing.T) {
 		}
 		methods = append(methods, req.Method)
 		switch req.Method {
-		case "XBMC.GetInfoBooleans":
-			// Screensaver NOT active → display was already on
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]bool{"System.ScreenSaverActive": false}})
 		case "Player.GetActivePlayers":
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": []map[string]any{{"playerid": 1, "type": "video"}}})
+			http.Error(w, "kodi busy", http.StatusBadGateway)
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{"result": "OK"})
 		}
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "rtsp://stream.example:8554/screenshare", "", "", server.Client())
-	if err := client.Open(context.Background()); err != nil {
-		t.Fatalf("Open() error = %v", err)
+	client := NewClient(server.URL, "ignored", "", "", server.Client())
+	client.setWokeDisplay(true)
+	err := client.Stop(context.Background())
+	if err == nil {
+		t.Fatal("expected Stop() to return error when GetActivePlayers fails")
 	}
-	// wokeDisplay should be false because display was already on
-	if client.consumeWokeDisplay() {
-		t.Fatal("expected wokeDisplay to be false when display was already on")
-	}
-
-	// Stop should NOT send standby
-	if err := client.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop() error = %v", err)
-	}
-	// Expect only GetActivePlayers + Player.Stop (no Addons.ExecuteAddon for standby)
-	stopMethods := methods[3:] // skip the 3 Open methods (GetInfoBooleans, ExecuteAddon, Player.Open)
-	if len(stopMethods) != 2 || stopMethods[0] != "Player.GetActivePlayers" || stopMethods[1] != "Player.Stop" {
-		t.Fatalf("unexpected Stop method sequence (expected no standby): %#v", stopMethods)
+	// Standby must still be attempted even though player stop failed
+	if len(methods) != 2 || methods[0] != "Player.GetActivePlayers" || methods[1] != "Addons.ExecuteAddon" {
+		t.Fatalf("expected standby to be sent despite player error, got method sequence: %#v", methods)
 	}
 }
 
