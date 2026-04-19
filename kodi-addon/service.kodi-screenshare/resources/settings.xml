@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+	<category label="General">
+		<setting id="listen_addr" type="text" label="Listen address" default=":443"/>
+		<setting id="stream_host" type="text" label="Stream host (IP for RTSP)" default="127.0.0.1"/>
+	</category>
+</settings>

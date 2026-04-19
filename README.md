@@ -18,28 +18,38 @@ Browser ──WebRTC (H.264)──▶ MediaMTX ──RTSP──▶ Kodi player �
 4. The Go bridge tells Kodi to play the RTSP stream via JSON-RPC.
 5. A bundled Kodi addon handles HDMI-CEC: waking the TV when sharing starts and putting it on standby when sharing ends (only if the app woke it).
 
-Everything runs on the same Raspberry Pi as a single systemd service.
+Everything runs on the same Raspberry Pi, packaged as a single Kodi addon.
 
 ## Requirements
 
 **Target device (Raspberry Pi):**
 - LibreELEC with Kodi
-- Kodi web server enabled with a password set (Settings → Services → Control)
+- "Unknown sources" enabled in Kodi (Settings → System → Add-ons)
 
 **Build machine:**
 - [Go](https://go.dev/) 1.22+
-- `curl`, `ssh`, `tar` (standard Unix tools)
-- SSH access to the LibreELEC device (LibreELEC uses `root` with SSH enabled)
+- [just](https://github.com/casey/just) task runner
+- `curl`, `zip` (standard Unix tools)
 
 ## Quick install
 
-The `install.sh` script builds everything, copies it to the Pi over SSH, and starts the service:
+1. **Build the addon zip** on your development machine:
 
-```bash
-./install.sh
-```
+   ```bash
+   just package-addon
+   ```
 
-It will prompt for the SSH host, Kodi username, and password. That's it — once it finishes, open `https://<your-pi-ip>` in your browser.
+   This cross-compiles the Go bridge for linux/arm64, fetches MediaMTX, and packages everything into `build/service.kodi-screenshare.zip`.
+
+2. **Copy the zip** to your Kodi device (USB drive, `scp`, network share, etc.):
+
+   ```bash
+   scp build/service.kodi-screenshare.zip root@libreelec.lan:/storage/
+   ```
+
+3. **Install in Kodi:** Settings → Add-ons → Install from zip file → select `service.kodi-screenshare.zip`.
+
+4. **Restart Kodi** to start the bridge service. Open `https://<your-pi-ip>` in your browser.
 
 ## Browser support
 
@@ -50,12 +60,19 @@ Your browser will show a certificate warning because of the self-signed TLS cert
 
 ## Development
 
-For local development against a remote Kodi host, use the [Justfile](https://github.com/casey/just): You might have to tweak some variables in the Justfile to make it work against your specific setup.
+The project uses a [Justfile](https://github.com/casey/just) for build tasks. Run `just` to see available recipes.
+
+To iterate on a LibreELEC device over SSH:
 
 ```bash
-# Install just: https://github.com/casey/just#installation
-KODI_PASSWORD=yourpassword just run-dev
+# Build, copy the addon, and restart Kodi on the target
+just install libreelec.lan
+
+# View bridge and Kodi logs from the target
+just logs libreelec.lan
 ```
+
+The bridge logs to `/tmp/kodi-screenshare.log` on the device (tmpfs, capped at 1 MB).
 
 ### Project structure
 
@@ -67,22 +84,13 @@ internal/
   server/                HTTP server (web UI, API hooks, WHIP proxy)
   session/               In-memory session state
 web/                     Embedded frontend (HTML/JS)
-kodi-addon/              Kodi HDMI-CEC helper addon
-deploy/                  Systemd service template
+kodi-addon/              Kodi addon (service + CEC helper)
 docs/                    Design documents (PRD, technical design)
 ```
 
 ## Uninstalling
 
-SSH into the Pi and run:
-
-```bash
-systemctl disable --now webrtc-bridge
-rm -rf /storage/kodi-screenshare
-rm /storage/.config/system.d/webrtc-bridge.service
-rm -rf /storage/.kodi/addons/script.kodi-screenshare-cec
-systemctl daemon-reload
-```
+In Kodi: Settings → Add-ons → My add-ons → Services → Kodi Screenshare → Uninstall.
 
 ## License
 

@@ -31,7 +31,7 @@ import (
 const (
 	defaultHTTPListenAddr  = ":443"
 	defaultMediaAPIBaseURL = "http://127.0.0.1:9997"
-	defaultKodiAPIEndpoint = "http://127.0.0.1:8080/jsonrpc"
+	defaultKodiAPIEndpoint = "127.0.0.1:9090"
 	defaultStreamHost      = "127.0.0.1"
 	defaultWhipBaseURL     = "http://127.0.0.1:8889"
 	rtspStreamPort         = "8554"
@@ -42,8 +42,6 @@ func main() {
 	var listenAddr string
 	var hookBaseURL string
 	var kodiEndpoint string
-	var kodiUsername string
-	var kodiPassword string
 	var streamHost string
 	var tlsCert string
 	var tlsKey string
@@ -51,9 +49,7 @@ func main() {
 
 	flag.StringVar(&listenAddr, "listen-addr", defaultHTTPListenAddr, "HTTPS listen address for the web UI and API")
 	flag.StringVar(&hookBaseURL, "hook-base-url", "", "Base URL for MediaMTX hooks to call back into, e.g. https://127.0.0.1:443")
-	flag.StringVar(&kodiEndpoint, "kodi-endpoint", defaultKodiAPIEndpoint, "Kodi JSON-RPC endpoint")
-	flag.StringVar(&kodiUsername, "kodi-username", "", "Kodi web server username for HTTP basic auth")
-	flag.StringVar(&kodiPassword, "kodi-password", "", "Kodi web server password for HTTP basic auth")
+	flag.StringVar(&kodiEndpoint, "kodi-endpoint", defaultKodiAPIEndpoint, "Kodi JSON-RPC TCP endpoint (host:port)")
 	flag.StringVar(&streamHost, "stream-host", defaultStreamHost, "Host or IP address Kodi should use for the RTSP stream")
 	flag.StringVar(&tlsCert, "tls-cert", "", "Path to TLS certificate file (auto-generated if empty)")
 	flag.StringVar(&tlsKey, "tls-key", "", "Path to TLS private key file (auto-generated if empty)")
@@ -75,7 +71,7 @@ func main() {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	state := session.NewState()
 	streamURL := buildRTSPStreamURL(streamHost)
-	kodiClient := kodi.NewClient(kodiEndpoint, streamURL, kodiUsername, kodiPassword, httpClient)
+	kodiClient := kodi.NewClient(kodiEndpoint, streamURL)
 	mediaClient := mediamtx.NewAPIClient(defaultMediaAPIBaseURL, pathName, httpClient)
 	app := server.New(state, kodiClient, mediaClient, defaultWhipBaseURL)
 	manager := mediamtx.NewManager(mediamtxPath, hookBaseURL, logger)

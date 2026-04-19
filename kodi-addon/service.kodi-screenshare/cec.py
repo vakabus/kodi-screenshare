@@ -1,3 +1,5 @@
+"""HDMI-CEC helper script callable via Addons.ExecuteAddon."""
+
 import sys
 import urllib.parse
 

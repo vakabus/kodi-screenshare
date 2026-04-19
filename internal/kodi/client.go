@@ -1,14 +1,11 @@
 package kodi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"net/url"
+	"net"
 	"os/exec"
 	"strings"
 	"sync"
@@ -18,16 +15,13 @@ import (
 const (
 	openRetryCount   = 3
 	openRetryDelay   = 500 * time.Millisecond
-	wakeAddonID      = "script.kodi-screenshare-cec"
+	wakeAddonID      = "service.kodi-screenshare"
 	cecQueryTimeout  = 5 * time.Second
 )
 
 type Client struct {
 	endpoint    string
 	streamURL   string
-	username    string
-	password    string
-	httpClient  *http.Client
 	mu          sync.Mutex
 	wokeDisplay bool
 }
@@ -54,25 +48,10 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-func NewClient(endpoint, streamURL, username, password string, httpClient *http.Client) *Client {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-
-	parsedEndpoint, parsedUser, parsedPass := parseEndpointCredentials(endpoint)
-	if username == "" {
-		username = parsedUser
-	}
-	if password == "" {
-		password = parsedPass
-	}
-
+func NewClient(endpoint, streamURL string) *Client {
 	return &Client{
-		endpoint:   parsedEndpoint,
-		streamURL:  streamURL,
-		username:   username,
-		password:   password,
-		httpClient: httpClient,
+		endpoint:  endpoint,
+		streamURL: streamURL,
 	}
 }
 
@@ -229,28 +208,25 @@ func (c *Client) call(ctx context.Context, rpcReq rpcRequest, out any) error {
 		return fmt.Errorf("marshal Kodi request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", c.endpoint)
 	if err != nil {
-		return fmt.Errorf("build Kodi request: %w", err)
+		return fmt.Errorf("connect to Kodi at %s: %w", c.endpoint, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.username != "" {
-		req.SetBasicAuth(c.username, c.password)
+	defer conn.Close()
+
+	// Set deadline from context if present.
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("call Kodi method %s: %w", rpcReq.Method, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Kodi method %s returned %s: %s", rpcReq.Method, resp.Status, string(payload))
+	body = append(body, '\n')
+	if _, err := conn.Write(body); err != nil {
+		return fmt.Errorf("send Kodi request %s: %w", rpcReq.Method, err)
 	}
 
 	var envelope rpcEnvelope
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := json.NewDecoder(conn).Decode(&envelope); err != nil {
 		return fmt.Errorf("decode Kodi response for %s: %w", rpcReq.Method, err)
 	}
 	if envelope.Error != nil {
@@ -264,18 +240,4 @@ func (c *Client) call(ctx context.Context, rpcReq rpcRequest, out any) error {
 	}
 
 	return nil
-}
-
-func parseEndpointCredentials(rawEndpoint string) (endpoint, username, password string) {
-	endpoint = rawEndpoint
-	parsedURL, err := url.Parse(rawEndpoint)
-	if err != nil || parsedURL.User == nil {
-		return endpoint, "", ""
-	}
-
-	username = parsedURL.User.Username()
-	password, _ = parsedURL.User.Password()
-	parsedURL.User = nil
-
-	return parsedURL.String(), username, password
 }

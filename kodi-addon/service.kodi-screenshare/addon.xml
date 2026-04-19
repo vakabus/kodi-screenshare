@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="service.kodi-screenshare" name="Kodi Screenshare" version="0.1.0" provider-name="Vasek Sraier">
+	<requires>
+		<import addon="xbmc.python" version="3.0.0"/>
+	</requires>
+	<!-- Auto-start service: launches the webrtc-bridge + mediamtx on Kodi startup -->
+	<extension point="xbmc.service" library="service.py" start="startup"/>
+	<!-- CEC helper script: callable via Addons.ExecuteAddon for HDMI-CEC commands -->
+	<extension point="xbmc.python.script" library="cec.py">
+		<provides>executable</provides>
+	</extension>
+	<extension point="xbmc.addon.metadata">
+		<summary lang="en">WebRTC screen sharing to Kodi</summary>
+		<description lang="en">Lets you share your screen to Kodi via a web browser.</description>
+		<platform>linux</platform>
+		<source>https://github.com/vakabus/kodi-screenshare</source>
+	</extension>
+</addon>
