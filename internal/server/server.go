@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/vakabus/kodi-screenshare/internal/metrics"
 	webui "github.com/vakabus/kodi-screenshare/web"
 )
 
@@ -26,18 +27,27 @@ type MediaController interface {
 	KickActivePublisher(context.Context) (bool, error)
 }
 
+// LatencyMonitor collects the playback latency time series while a share is active.
+type LatencyMonitor interface {
+	Start()
+	Stop()
+	Snapshot() (active bool, current float64, samples []metrics.Sample)
+}
+
 type Server struct {
-	session    SessionState
-	kodi       KodiController
-	media      MediaController
+	session     SessionState
+	kodi        KodiController
+	media       MediaController
+	metrics     LatencyMonitor
 	whipBaseURL string
 }
 
-func New(session SessionState, kodi KodiController, media MediaController, whipBaseURL string) *Server {
+func New(session SessionState, kodi KodiController, media MediaController, metrics LatencyMonitor, whipBaseURL string) *Server {
 	return &Server{
-		session:    session,
-		kodi:       kodi,
-		media:      media,
+		session:     session,
+		kodi:        kodi,
+		media:       media,
+		metrics:     metrics,
 		whipBaseURL: whipBaseURL,
 	}
 }
@@ -45,6 +55,7 @@ func New(session SessionState, kodi KodiController, media MediaController, whipB
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/metrics", s.handleMetrics)
 	mux.HandleFunc("/api/takeover", s.handleTakeover)
 	mux.HandleFunc("/api/hooks/ready", s.handleReady)
 	mux.HandleFunc("/api/hooks/not-ready", s.handleNotReady)
@@ -96,6 +107,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"active": s.session.IsActive()})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+
+	active, current, samples := s.metrics.Snapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":  active,
+		"current": current,
+		"samples": samples,
+	})
+}
+
 func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
@@ -133,6 +158,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("Kodi.Open succeeded")
+	s.metrics.Start()
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -145,6 +171,7 @@ func (s *Server) handleNotReady(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("MediaMTX not-ready hook received")
 	s.session.SetActive(false)
+	s.metrics.Stop()
 	log.Printf("invoking Kodi.Stop")
 	if err := s.kodi.Stop(r.Context()); err != nil {
 		log.Printf("Kodi.Stop failed: %v", err)

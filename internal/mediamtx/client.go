@@ -195,13 +195,18 @@ func (m *Manager) writeConfig() (string, error) {
 
 func GenerateConfig(hookBaseURL string) string {
 	baseURL := strings.TrimRight(hookBaseURL, "/")
+	// HLS is not used for playback (Kodi reads RTSP), so we do not remux it —
+	// continuous HLS muxing only wastes CPU on the Pi 5, whose software H.264
+	// decoder needs all the headroom it can get to avoid falling behind.
+	// rtspTransports: [tcp] pairs with the client-side rtsp_transport=tcp KODIPROP
+	// so the Kodi reader uses interleaved TCP (no UDP reorder/loss latency).
+	// writeQueueSize bounds the per-reader queue: if Kodi can't keep up, packets
+	// are dropped rather than queued into ever-growing latency.
 	return fmt.Sprintf(`api: yes
 apiAddress: 127.0.0.1:9997
 
-hlsAlwaysRemux: yes
-hlsVariant: mpegts
-hlsSegmentCount: 3
-hlsSegmentDuration: 1s
+rtspTransports: [tcp]
+writeQueueSize: 1024
 
 paths:
   screenshare:

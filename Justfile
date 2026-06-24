@@ -1,6 +1,6 @@
 set dotenv-load := false
 
-mediamtx_version := env_var_or_default("MEDIAMTX_VERSION", "1.17.1")
+mediamtx_version := env_var_or_default("MEDIAMTX_VERSION", "1.19.1")
 
 # Target architecture for cross-compilation (LibreELEC RPi5 = linux/arm64)
 target_os := env_var_or_default("TARGET_OS", "linux")

@@ -13,7 +13,7 @@
 # Optional environment variables:
 #   TARGET_OS            Cross-compile OS (default: linux)
 #   TARGET_ARCH          Cross-compile arch (default: arm64)
-#   MEDIAMTX_VERSION     MediaMTX release version (default: 1.17.1)
+#   MEDIAMTX_VERSION     MediaMTX release version (default: 1.19.1)
 #
 set -euo pipefail
 

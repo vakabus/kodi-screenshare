@@ -7,8 +7,20 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/vakabus/kodi-screenshare/internal/metrics"
 	"github.com/vakabus/kodi-screenshare/internal/session"
 )
+
+type fakeMonitor struct {
+	startCalls int
+	stopCalls  int
+}
+
+func (f *fakeMonitor) Start() { f.startCalls++ }
+func (f *fakeMonitor) Stop()  { f.stopCalls++ }
+func (f *fakeMonitor) Snapshot() (bool, float64, []metrics.Sample) {
+	return false, 0, nil
+}
 
 type fakeKodi struct {
 	openCalls int
@@ -40,7 +52,8 @@ func TestStatusHooksAndTakeover(t *testing.T) {
 	state := session.NewState()
 	kodi := &fakeKodi{}
 	media := &fakeMedia{}
-	srv := New(state, kodi, media, "")
+	monitor := &fakeMonitor{}
+	srv := New(state, kodi, media, monitor, "")
 	handler := srv.Handler()
 
 	statusReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
@@ -71,6 +84,9 @@ func TestStatusHooksAndTakeover(t *testing.T) {
 	if kodi.openCalls != 1 {
 		t.Fatalf("expected 1 open call, got %d", kodi.openCalls)
 	}
+	if monitor.startCalls != 1 {
+		t.Fatalf("expected ready hook to start the latency monitor once, got %d", monitor.startCalls)
+	}
 
 	takeoverReq := httptest.NewRequest(http.MethodPost, "/api/takeover", nil)
 	takeoverRec := httptest.NewRecorder()
@@ -95,5 +111,8 @@ func TestStatusHooksAndTakeover(t *testing.T) {
 	}
 	if kodi.stopCalls != 1 {
 		t.Fatalf("expected 1 stop call, got %d", kodi.stopCalls)
+	}
+	if monitor.stopCalls != 1 {
+		t.Fatalf("expected not-ready hook to stop the latency monitor once, got %d", monitor.stopCalls)
 	}
 }

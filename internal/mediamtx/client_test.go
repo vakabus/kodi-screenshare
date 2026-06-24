@@ -61,14 +61,14 @@ func TestGenerateConfig(t *testing.T) {
 	if want := "apiAddress: 127.0.0.1:9997"; !strings.Contains(config, want) {
 		t.Fatalf("config missing API address: %q", want)
 	}
-	if want := "hlsVariant: mpegts"; !strings.Contains(config, want) {
-		t.Fatalf("config missing HLS compatibility setting: %q", want)
+	if want := "rtspTransports: [tcp]"; !strings.Contains(config, want) {
+		t.Fatalf("config missing RTSP TCP transport setting: %q", want)
 	}
-	if want := "hlsSegmentCount: 3"; !strings.Contains(config, want) {
-		t.Fatalf("config missing HLS segment count tuning: %q", want)
+	if want := "writeQueueSize: 1024"; !strings.Contains(config, want) {
+		t.Fatalf("config missing write queue size tuning: %q", want)
 	}
-	if want := "hlsSegmentDuration: 1s"; !strings.Contains(config, want) {
-		t.Fatalf("config missing HLS segment duration tuning: %q", want)
+	if strings.Contains(config, "hls") {
+		t.Fatalf("config should no longer enable HLS remux, got:\n%s", config)
 	}
 }
 

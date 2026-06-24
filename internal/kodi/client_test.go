@@ -84,7 +84,7 @@ func TestOpen(t *testing.T) {
 		return map[string]any{"result": "OK"}
 	})
 
-	client := NewClient(srv.addr(), "rtsp://stream.example:8554/screenshare")
+	client := NewClient(srv.addr(), "/storage/.kodi/userdata/kodi-screenshare.strm")
 	if err := client.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -101,7 +101,7 @@ func TestOpen(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected item type: %T", params["item"])
 	}
-	if item["file"] != "rtsp://stream.example:8554/screenshare" {
+	if item["file"] != "/storage/.kodi/userdata/kodi-screenshare.strm" {
 		t.Fatalf("unexpected file payload: %#v", item)
 	}
 }
@@ -155,13 +155,13 @@ func TestOpenFailsWhenRPCNeverSucceeds(t *testing.T) {
 		return map[string]any{"result": "OK"}
 	})
 
-	client := NewClient(srv.addr(), "rtsp://stream.example:8554/screenshare")
+	client := NewClient(srv.addr(), "/storage/.kodi/userdata/kodi-screenshare.strm")
 	err := client.Open(context.Background())
 	if err == nil {
 		t.Fatal("expected Open() to fail when RPC never succeeds")
 	}
-	if !strings.Contains(err.Error(), "open Kodi stream at rtsp://stream.example:8554/screenshare") {
-		t.Fatalf("expected RTSP open error, got %v", err)
+	if !strings.Contains(err.Error(), "open Kodi stream /storage/.kodi/userdata/kodi-screenshare.strm") {
+		t.Fatalf("expected stream open error, got %v", err)
 	}
 	mu.Lock()
 	got := openAttempts
@@ -191,6 +191,76 @@ func TestOpenContinuesWhenWakeFails(t *testing.T) {
 	methods := srv.getMethods()
 	if len(methods) != 2 || methods[0] != "Addons.ExecuteAddon" || methods[1] != "Player.Open" {
 		t.Fatalf("unexpected method sequence: %#v", methods)
+	}
+}
+
+func TestBuildStrmFile(t *testing.T) {
+	t.Parallel()
+
+	out := BuildStrmFile("rtsp://127.0.0.1:8554/screenshare")
+	for _, want := range []string{
+		"#KODIPROP:inputstream=inputstream.ffmpegdirect",
+		"#KODIPROP:inputstream.ffmpegdirect.open_mode=ffmpeg",
+		"#KODIPROP:inputstream.ffmpegdirect.is_realtime_stream=true",
+		"rtsp://127.0.0.1:8554/screenshare",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("strm file missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("strm file should end with a newline, got:\n%q", out)
+	}
+}
+
+func TestGetActivePlayerPosition(t *testing.T) {
+	t.Parallel()
+
+	srv := newTCPServer(t, func(req rpcRequest) any {
+		switch req.Method {
+		case "Player.GetActivePlayers":
+			return map[string]any{"result": []map[string]any{{"playerid": 1, "type": "video"}}}
+		case "Player.GetProperties":
+			return map[string]any{"result": map[string]any{
+				"time": map[string]any{"hours": 0, "minutes": 0, "seconds": 2, "milliseconds": 500},
+			}}
+		default:
+			t.Errorf("unexpected method: %s", req.Method)
+			return map[string]any{"result": "OK"}
+		}
+	})
+
+	client := NewClient(srv.addr(), "ignored")
+	position, ok, err := client.GetActivePlayerPosition(context.Background())
+	if err != nil {
+		t.Fatalf("GetActivePlayerPosition() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true with an active video player")
+	}
+	if position < 2.49 || position > 2.51 {
+		t.Fatalf("unexpected position %v, want ~2.5", position)
+	}
+}
+
+func TestGetActivePlayerPositionNoActivePlayer(t *testing.T) {
+	t.Parallel()
+
+	srv := newTCPServer(t, func(req rpcRequest) any {
+		if req.Method == "Player.GetActivePlayers" {
+			return map[string]any{"result": []map[string]any{}}
+		}
+		t.Errorf("unexpected method when no player active: %s", req.Method)
+		return map[string]any{"result": "OK"}
+	})
+
+	client := NewClient(srv.addr(), "ignored")
+	_, ok, err := client.GetActivePlayerPosition(context.Background())
+	if err != nil {
+		t.Fatalf("GetActivePlayerPosition() error = %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false when no video player is active")
 	}
 }
 
